@@ -1,0 +1,16 @@
+id,name,age,city,salary,department,satisfaction_score
+1,Alice Johnson,30,New York,75000,Engineering,4.5
+2,Bob Smith,25,Los Angeles,62000,Marketing,3.8
+3,Charlie Brown,35,Chicago,85000,Engineering,4.2
+4,Diana Prince,28,San Francisco,95000,Sales,
+5,Eve Wilson,32,Boston,72000,Marketing,4.0
+6,Frank Miller,45,Seattle,105000,Engineering,4.8
+7,Grace Lee,29,Austin,,Marketing,3.5
+8,Henry Davis,38,Denver,88000,Sales,4.1
+9,Ivy Chen,27,Portland,71000,Engineering,
+10,Jack Robinson,41,Miami,92000,Sales,4.6
+11,Kelly White,,San Diego,78000,Marketing,3.9
+12,Leo Brown,33,Boston,82000,Engineering,4.3
+13,Maya Singh,31,New York,91000,Sales,4.7
+14,Nina Patel,29,,73000,Marketing,3.6
+15,Oscar Lee,36,Seattle,98000,Engineering,4.4

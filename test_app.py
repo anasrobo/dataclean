@@ -1,12 +1,15 @@
 import pytest
 import pandas as pd
 import io
+import numpy as np
 from unittest.mock import Mock
 from app import (
     init_session_state,
     reset_session_data,
     update_session_data,
-    read_uploaded_file
+    read_uploaded_file,
+    get_numeric_columns,
+    get_categorical_columns
 )
 
 
@@ -79,6 +82,79 @@ def test_reset_session_data():
     assert session_state['df'] is None
     assert session_state['filename'] is None
     assert session_state['upload_error'] is None
+
+
+def test_get_numeric_columns():
+    """Test identification of numeric columns."""
+    df = pd.DataFrame({
+        'int_col': [1, 2, 3],
+        'float_col': [1.5, 2.5, 3.5],
+        'str_col': ['a', 'b', 'c'],
+        'bool_col': [True, False, True]
+    })
+    
+    numeric_cols = get_numeric_columns(df)
+    assert 'int_col' in numeric_cols
+    assert 'float_col' in numeric_cols
+    assert 'str_col' not in numeric_cols
+
+
+def test_get_categorical_columns():
+    """Test identification of categorical columns."""
+    df = pd.DataFrame({
+        'int_col': [1, 2, 3],
+        'str_col': ['a', 'b', 'c'],
+        'cat_col': pd.Categorical(['x', 'y', 'z'])
+    })
+    
+    categorical_cols = get_categorical_columns(df)
+    assert 'str_col' in categorical_cols
+    assert 'cat_col' in categorical_cols
+    assert 'int_col' not in categorical_cols
+
+
+def test_numeric_columns_empty_df():
+    """Test numeric column detection on empty DataFrame."""
+    df = pd.DataFrame()
+    numeric_cols = get_numeric_columns(df)
+    assert len(numeric_cols) == 0
+
+
+def test_categorical_columns_empty_df():
+    """Test categorical column detection on empty DataFrame."""
+    df = pd.DataFrame()
+    categorical_cols = get_categorical_columns(df)
+    assert len(categorical_cols) == 0
+
+
+def test_missing_data_detection():
+    """Test detection of missing data."""
+    df = pd.DataFrame({
+        'col1': [1, 2, None, 4],
+        'col2': [None, 'b', 'c', None],
+        'col3': [1.1, 2.2, 3.3, 4.4]
+    })
+    
+    null_counts = df.isnull().sum()
+    assert null_counts['col1'] == 1
+    assert null_counts['col2'] == 2
+    assert null_counts['col3'] == 0
+
+
+def test_correlation_computation():
+    """Test correlation matrix computation."""
+    np.random.seed(42)
+    df = pd.DataFrame({
+        'x': np.random.randn(50),
+        'y': np.random.randn(50),
+        'z': np.random.randn(50)
+    })
+    
+    numeric_cols = get_numeric_columns(df)
+    corr_matrix = df[numeric_cols].corr()
+    
+    assert corr_matrix.shape == (3, 3)
+    assert all(abs(corr_matrix.values.diagonal() - 1.0) < 0.0001)
 
 
 if __name__ == '__main__':
