@@ -16,6 +16,8 @@ def init_session_state():
         st.session_state['filename'] = None
     if 'upload_error' not in st.session_state:
         st.session_state['upload_error'] = None
+    if 'cleaned_df' not in st.session_state:
+        st.session_state['cleaned_df'] = None
     if 'feature_engineering_log' not in st.session_state:
         st.session_state['feature_engineering_log'] = []
     if 'encoded_columns' not in st.session_state:
@@ -29,6 +31,7 @@ def reset_session_data():
     st.session_state['df'] = None
     st.session_state['filename'] = None
     st.session_state['upload_error'] = None
+    st.session_state['cleaned_df'] = None
     st.session_state['feature_engineering_log'] = []
     st.session_state['encoded_columns'] = []
     st.session_state['cleaning_log'] = []
@@ -46,6 +49,7 @@ def update_session_data(df: Optional[pd.DataFrame], filename: Optional[str], err
     st.session_state['df'] = df
     st.session_state['filename'] = filename
     st.session_state['upload_error'] = error
+    st.session_state['cleaned_df'] = df.copy() if df is not None else None
 
 
 def read_uploaded_file(uploaded_file) -> tuple[Optional[pd.DataFrame], Optional[str]]:
@@ -676,6 +680,325 @@ def render_missing_data_analysis(df: pd.DataFrame):
         st.metric("Overall Missing %", f"{(total_missing / total_cells * 100):.2f}%")
 
 
+def remove_duplicates(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """
+    Remove duplicate rows from DataFrame.
+    
+    Args:
+        df: The pandas DataFrame
+        
+    Returns:
+        Tuple of (cleaned_df, num_duplicates_removed)
+    """
+    initial_rows = len(df)
+    df_cleaned = df.drop_duplicates()
+    num_removed = initial_rows - len(df_cleaned)
+    return df_cleaned, num_removed
+
+
+def fill_missing_values(df: pd.DataFrame, strategy: str, column: Optional[str] = None, constant_value: Optional[str] = None) -> tuple[pd.DataFrame, int]:
+    """
+    Fill missing values using specified strategy.
+    
+    Args:
+        df: The pandas DataFrame
+        strategy: 'drop', 'mean', 'median', 'mode', or 'constant'
+        column: Column to apply strategy to (for numeric strategies)
+        constant_value: Value to use for constant fill strategy
+        
+    Returns:
+        Tuple of (cleaned_df, num_rows_affected)
+    """
+    df_copy = df.copy()
+    
+    if strategy == 'drop':
+        initial_rows = len(df_copy)
+        df_copy = df_copy.dropna()
+        num_affected = initial_rows - len(df_copy)
+    elif strategy == 'mean':
+        if column and column in df_copy.columns and df_copy[column].dtype in [np.int64, np.float64, float, int]:
+            mean_val = df_copy[column].mean()
+            df_copy[column] = df_copy[column].fillna(mean_val)
+            num_affected = df[column].isnull().sum()
+        else:
+            return df_copy, 0
+    elif strategy == 'median':
+        if column and column in df_copy.columns and df_copy[column].dtype in [np.int64, np.float64, float, int]:
+            median_val = df_copy[column].median()
+            df_copy[column] = df_copy[column].fillna(median_val)
+            num_affected = df[column].isnull().sum()
+        else:
+            return df_copy, 0
+    elif strategy == 'mode':
+        if column and column in df_copy.columns:
+            mode_val = df_copy[column].mode()
+            if len(mode_val) > 0:
+                df_copy[column] = df_copy[column].fillna(mode_val[0])
+                num_affected = df[column].isnull().sum()
+            else:
+                return df_copy, 0
+        else:
+            return df_copy, 0
+    elif strategy == 'constant':
+        if column and column in df_copy.columns and constant_value is not None:
+            df_copy[column] = df_copy[column].fillna(constant_value)
+            num_affected = df[column].isnull().sum()
+        else:
+            return df_copy, 0
+    else:
+        return df_copy, 0
+    
+    return df_copy, int(num_affected)
+
+
+def detect_outliers_iqr(df: pd.DataFrame, column: str) -> tuple[pd.Series, float, float]:
+    """
+    Detect outliers using IQR method.
+    
+    Args:
+        df: The pandas DataFrame
+        column: Column name to detect outliers in
+        
+    Returns:
+        Tuple of (outlier_mask, lower_bound, upper_bound)
+    """
+    if column not in df.columns or df[column].dtype not in [np.int64, np.float64, float, int]:
+        return pd.Series([False] * len(df)), None, None
+    
+    Q1 = df[column].quantile(0.25)
+    Q3 = df[column].quantile(0.75)
+    IQR = Q3 - Q1
+    
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+    
+    outlier_mask = (df[column] < lower_bound) | (df[column] > upper_bound)
+    
+    return outlier_mask, lower_bound, upper_bound
+
+
+def remove_outliers_iqr(df: pd.DataFrame, columns: list) -> tuple[pd.DataFrame, int]:
+    """
+    Remove outliers using IQR method for selected columns.
+    
+    Args:
+        df: The pandas DataFrame
+        columns: List of column names to check for outliers
+        
+    Returns:
+        Tuple of (cleaned_df, num_outliers_removed)
+    """
+    df_copy = df.copy()
+    initial_rows = len(df_copy)
+    
+    combined_mask = pd.Series([False] * len(df_copy))
+    
+    for col in columns:
+        outlier_mask, _, _ = detect_outliers_iqr(df_copy, col)
+        combined_mask = combined_mask | outlier_mask
+    
+    df_copy = df_copy[~combined_mask]
+    num_removed = initial_rows - len(df_copy)
+    
+    return df_copy, num_removed
+
+
+def render_data_cleaning_tab(df: pd.DataFrame):
+    """
+    Render the Data Cleaning tab with interactive controls for data cleaning operations.
+    
+    Args:
+        df: The pandas DataFrame to clean
+    """
+    if df is None or df.empty:
+        st.info("👋 Please upload a data file to perform cleaning operations.")
+        return
+    
+    st.header("🧹 Data Cleaning")
+    
+    if 'cleaned_df' not in st.session_state:
+        st.session_state['cleaned_df'] = df.copy()
+    
+    cleaning_tabs = st.tabs([
+        "🔄 Remove Duplicates",
+        "❌ Handle Missing Values",
+        "📊 Detect & Remove Outliers"
+    ])
+    
+    with cleaning_tabs[0]:
+        st.subheader("🔄 Remove Duplicate Rows")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("Current Rows", len(st.session_state['cleaned_df']))
+        
+        with col2:
+            num_duplicates = len(st.session_state['cleaned_df']) - len(st.session_state['cleaned_df'].drop_duplicates())
+            st.metric("Duplicate Rows", num_duplicates)
+        
+        if num_duplicates > 0:
+            if st.button("Remove Duplicates", key="remove_duplicates_btn", use_container_width=True):
+                cleaned, num_removed = remove_duplicates(st.session_state['cleaned_df'])
+                st.session_state['cleaned_df'] = cleaned
+                st.success(f"✅ Removed {num_removed} duplicate row(s). New row count: {len(cleaned)}")
+                st.rerun()
+        else:
+            st.info("✨ No duplicate rows found in the dataset.")
+    
+    with cleaning_tabs[1]:
+        st.subheader("❌ Handle Missing Values")
+        
+        null_counts = st.session_state['cleaned_df'].isnull().sum()
+        total_missing = null_counts.sum()
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Missing Values", int(total_missing))
+        with col2:
+            st.metric("Columns with Missing", int((null_counts > 0).sum()))
+        with col3:
+            st.metric("Current Rows", len(st.session_state['cleaned_df']))
+        
+        if total_missing == 0:
+            st.success("✅ No missing values found in the dataset!")
+        else:
+            missing_df = pd.DataFrame({
+                'Column': null_counts[null_counts > 0].index,
+                'Missing Count': null_counts[null_counts > 0].values,
+                'Missing %': (null_counts[null_counts > 0].values / len(st.session_state['cleaned_df']) * 100).round(2)
+            })
+            
+            st.markdown("#### Columns with Missing Values")
+            st.dataframe(missing_df, use_container_width=True)
+            
+            st.markdown("---")
+            
+            with st.expander("🔧 Apply Missing Value Strategy", expanded=True):
+                strategy = st.selectbox(
+                    "Select strategy",
+                    ["Drop Rows", "Mean (numeric only)", "Median (numeric only)", "Mode", "Constant Fill"],
+                    key="missing_strategy"
+                )
+                
+                if strategy != "Drop Rows":
+                    cols_with_missing = null_counts[null_counts > 0].index.tolist()
+                    selected_column = st.selectbox(
+                        "Select column to fill",
+                        cols_with_missing,
+                        key="missing_column"
+                    )
+                    
+                    if strategy == "Constant Fill":
+                        constant_value = st.text_input(
+                            "Enter constant value to fill missing cells",
+                            key="constant_fill_value"
+                        )
+                    else:
+                        constant_value = None
+                else:
+                    selected_column = None
+                    constant_value = None
+                
+                strategy_map = {
+                    "Drop Rows": "drop",
+                    "Mean (numeric only)": "mean",
+                    "Median (numeric only)": "median",
+                    "Mode": "mode",
+                    "Constant Fill": "constant"
+                }
+                
+                if st.button("Apply Strategy", key="apply_missing_btn", use_container_width=True):
+                    cleaned, num_affected = fill_missing_values(
+                        st.session_state['cleaned_df'],
+                        strategy_map[strategy],
+                        selected_column,
+                        constant_value
+                    )
+                    
+                    if num_affected > 0:
+                        st.session_state['cleaned_df'] = cleaned
+                        st.success(f"✅ Applied {strategy.lower()}. Affected rows: {num_affected}. New row count: {len(cleaned)}")
+                        st.rerun()
+                    else:
+                        st.warning("No missing values were affected by this operation.")
+    
+    with cleaning_tabs[2]:
+        st.subheader("📊 Detect & Remove Outliers (IQR Method)")
+        
+        numeric_cols = get_numeric_columns(st.session_state['cleaned_df'])
+        
+        if len(numeric_cols) == 0:
+            st.warning("No numeric columns available for outlier detection.")
+        else:
+            selected_columns = st.multiselect(
+                "Select numeric columns to check for outliers",
+                numeric_cols,
+                default=numeric_cols[:1] if numeric_cols else [],
+                key="outlier_columns"
+            )
+            
+            if selected_columns:
+                st.markdown("---")
+                
+                outlier_stats = []
+                for col in selected_columns:
+                    outlier_mask, lower, upper = detect_outliers_iqr(st.session_state['cleaned_df'], col)
+                    num_outliers = outlier_mask.sum()
+                    outlier_stats.append({
+                        'Column': col,
+                        'Lower Bound': f"{lower:.2f}" if lower is not None else "N/A",
+                        'Upper Bound': f"{upper:.2f}" if upper is not None else "N/A",
+                        'Outlier Count': num_outliers,
+                        'Outlier %': f"{(num_outliers / len(st.session_state['cleaned_df']) * 100):.2f}%"
+                    })
+                
+                st.markdown("#### Outlier Summary")
+                st.dataframe(pd.DataFrame(outlier_stats), use_container_width=True)
+                
+                st.markdown("---")
+                
+                with st.expander("📈 Visualize Pre/Post Distribution", expanded=True):
+                    if len(selected_columns) > 0:
+                        for col in selected_columns:
+                            try:
+                                outlier_mask, lower, upper = detect_outliers_iqr(st.session_state['cleaned_df'], col)
+                                df_no_outliers = st.session_state['cleaned_df'][~outlier_mask]
+                                
+                                fig = go.Figure()
+                                
+                                fig.add_trace(go.Box(
+                                    y=st.session_state['cleaned_df'][col],
+                                    name='Before',
+                                    marker_color='lightblue'
+                                ))
+                                
+                                fig.add_trace(go.Box(
+                                    y=df_no_outliers[col],
+                                    name='After',
+                                    marker_color='lightgreen'
+                                ))
+                                
+                                fig.update_layout(
+                                    title=f"Distribution of {col} - Pre/Post Outlier Removal",
+                                    yaxis_title=col,
+                                    height=400,
+                                    showlegend=True
+                                )
+                                
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                            except Exception as e:
+                                st.warning(f"Could not visualize {col}: {str(e)}")
+                
+                st.markdown("---")
+                
+                with st.expander("🔧 Apply Outlier Removal", expanded=True):
+                    if st.button("Remove Outliers", key="remove_outliers_btn", use_container_width=True):
+                        cleaned, num_removed = remove_outliers_iqr(st.session_state['cleaned_df'], selected_columns)
+                        st.session_state['cleaned_df'] = cleaned
+                        st.success(f"✅ Removed {num_removed} outlier row(s). New row count: {len(cleaned)}")
+                        st.rerun()
 def apply_one_hot_encoding(df: pd.DataFrame, columns: list) -> tuple[pd.DataFrame, list]:
     """
     Apply one-hot encoding to specified categorical columns.
@@ -1234,6 +1557,19 @@ def main():
         else:
             render_empty_state()
     
+    if st.session_state['df'] is not None:
+        main_tabs = st.tabs(["📋 Data Preview", "🔬 EDA", "🧹 Data Cleaning"])
+        
+        with main_tabs[0]:
+            render_data_preview(st.session_state['df'])
+        
+        with main_tabs[1]:
+            render_eda_tab(st.session_state['df'])
+        
+        with main_tabs[2]:
+            render_data_cleaning_tab(st.session_state['df'])
+    else:
+        render_empty_state()
     except Exception as e:
         st.error(f"❌ Critical Error: {str(e)}")
         st.warning("The application encountered an unexpected error. Please refresh the page and try again.")
