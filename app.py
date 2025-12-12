@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
 from typing import Optional
-import io
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
+from imblearn.over_sampling import SMOTE
 
 
 def init_session_state():
@@ -15,6 +16,10 @@ def init_session_state():
         st.session_state['filename'] = None
     if 'upload_error' not in st.session_state:
         st.session_state['upload_error'] = None
+    if 'feature_engineering_log' not in st.session_state:
+        st.session_state['feature_engineering_log'] = []
+    if 'encoded_columns' not in st.session_state:
+        st.session_state['encoded_columns'] = []
 
 
 def reset_session_data():
@@ -22,6 +27,8 @@ def reset_session_data():
     st.session_state['df'] = None
     st.session_state['filename'] = None
     st.session_state['upload_error'] = None
+    st.session_state['feature_engineering_log'] = []
+    st.session_state['encoded_columns'] = []
 
 
 def update_session_data(df: Optional[pd.DataFrame], filename: Optional[str], error: Optional[str] = None):
@@ -460,6 +467,286 @@ def render_missing_data_analysis(df: pd.DataFrame):
         st.metric("Overall Missing %", f"{(total_missing / total_cells * 100):.2f}%")
 
 
+def apply_one_hot_encoding(df: pd.DataFrame, columns: list) -> tuple[pd.DataFrame, list]:
+    """
+    Apply one-hot encoding to specified categorical columns.
+    
+    Args:
+        df: The pandas DataFrame
+        columns: List of column names to encode
+        
+    Returns:
+        Tuple of (encoded DataFrame, list of new column names)
+    """
+    new_columns = []
+    df_encoded = df.copy()
+    
+    for col in columns:
+        if col not in df_encoded.columns:
+            continue
+            
+        try:
+            encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+            encoded_array = encoder.fit_transform(df_encoded[[col]])
+            encoded_feature_names = encoder.get_feature_names_out([col])
+            
+            encoded_df = pd.DataFrame(encoded_array, columns=encoded_feature_names, index=df_encoded.index)
+            df_encoded = pd.concat([df_encoded, encoded_df], axis=1)
+            
+            new_columns.extend(encoded_feature_names.tolist())
+        except Exception as e:
+            st.error(f"Failed to apply one-hot encoding to {col}: {str(e)}")
+            continue
+    
+    return df_encoded, new_columns
+
+
+def apply_label_encoding(df: pd.DataFrame, columns: list) -> tuple[pd.DataFrame, list]:
+    """
+    Apply label encoding to specified categorical columns.
+    
+    Args:
+        df: The pandas DataFrame
+        columns: List of column names to encode
+        
+    Returns:
+        Tuple of (encoded DataFrame, list of encoded column names)
+    """
+    new_columns = []
+    df_encoded = df.copy()
+    
+    for col in columns:
+        if col not in df_encoded.columns:
+            continue
+            
+        try:
+            encoder = LabelEncoder()
+            df_encoded[f"{col}_encoded"] = encoder.fit_transform(df_encoded[col].astype(str))
+            new_columns.append(f"{col}_encoded")
+        except Exception as e:
+            st.error(f"Failed to apply label encoding to {col}: {str(e)}")
+            continue
+    
+    return df_encoded, new_columns
+
+
+def render_categorical_encoding_tab(df: pd.DataFrame):
+    """
+    Render categorical encoding interface with one-hot and label encoding options.
+    
+    Args:
+        df: The pandas DataFrame
+    """
+    st.subheader("🏷️ Categorical Encoding")
+    
+    categorical_cols = get_categorical_columns(df)
+    
+    if len(categorical_cols) == 0:
+        st.info("No categorical columns found in the dataset.")
+        return
+    
+    st.markdown("Select columns to encode and choose an encoding method.")
+    
+    encoding_method = st.radio(
+        "Select encoding method",
+        ["One-Hot Encoding", "Label Encoding"],
+        horizontal=True
+    )
+    
+    selected_cols = st.multiselect(
+        "Select categorical columns to encode",
+        categorical_cols,
+        help="Choose one or more columns to apply the selected encoding"
+    )
+    
+    if selected_cols and st.button("Apply Encoding", key="apply_encoding_btn"):
+        try:
+            df_encoded = df.copy()
+            new_columns = []
+            
+            if encoding_method == "One-Hot Encoding":
+                df_encoded, new_columns = apply_one_hot_encoding(df_encoded, selected_cols)
+            else:
+                df_encoded, new_columns = apply_label_encoding(df_encoded, selected_cols)
+            
+            st.session_state['df'] = df_encoded
+            st.session_state['encoded_columns'].extend(new_columns)
+            
+            log_entry = f"✅ Applied {encoding_method} to: {', '.join(selected_cols)}"
+            st.session_state['feature_engineering_log'].append(log_entry)
+            
+            st.success(f"✅ Successfully applied {encoding_method}!")
+            st.info(f"New columns created: {', '.join(new_columns)}")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Error applying encoding: {str(e)}")
+    
+    if st.session_state.get('encoded_columns'):
+        st.markdown("---")
+        st.markdown("#### Encoded Columns")
+        st.write(st.session_state['encoded_columns'])
+
+
+def render_smote_balancing_tab(df: pd.DataFrame):
+    """
+    Render SMOTE balancing interface.
+    
+    Args:
+        df: The pandas DataFrame
+    """
+    st.subheader("⚖️ SMOTE Balancing")
+    
+    all_cols = df.columns.tolist()
+    numeric_cols = get_numeric_columns(df)
+    categorical_cols = get_categorical_columns(df)
+    
+    if len(numeric_cols) < 2:
+        st.warning("Need at least 2 numeric columns for SMOTE balancing.")
+        return
+    
+    st.markdown("Select a target column and SMOTE will balance the dataset based on class distribution.")
+    
+    target_col = st.selectbox(
+        "Select target column for balancing",
+        all_cols,
+        help="Choose the column containing the target classes to balance"
+    )
+    
+    if target_col:
+        class_counts = df[target_col].value_counts()
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### Class Distribution (Before)")
+            fig_before = px.bar(
+                x=class_counts.index.astype(str),
+                y=class_counts.values,
+                labels={'x': target_col, 'y': 'Count'},
+                title="Before SMOTE"
+            )
+            fig_before.update_layout(height=400)
+            st.plotly_chart(fig_before, use_container_width=True)
+            
+            for idx, count in class_counts.items():
+                st.write(f"{idx}: {count} samples")
+        
+        with col2:
+            if st.button("Apply SMOTE Balancing", key="apply_smote_btn"):
+                try:
+                    if target_col in categorical_cols:
+                        st.error(f"❌ Target column '{target_col}' is categorical. SMOTE requires numeric or encoded target.")
+                    elif target_col in numeric_cols:
+                        numeric_features = df[numeric_cols].copy()
+                        
+                        nan_mask = numeric_features.isnull().any(axis=1)
+                        if nan_mask.any():
+                            st.warning(f"⚠️ Removing {nan_mask.sum()} rows with missing values in numeric features.")
+                            numeric_features = numeric_features[~nan_mask]
+                            target_series = df.loc[numeric_features.index, target_col]
+                        else:
+                            target_series = df[target_col]
+                        
+                        smote = SMOTE(random_state=42)
+                        X_resampled, y_resampled = smote.fit_resample(numeric_features, target_series)
+                        
+                        df_resampled = pd.DataFrame(X_resampled, columns=numeric_features.columns)
+                        df_resampled[target_col] = y_resampled
+                        
+                        st.session_state['df'] = df_resampled
+                        log_entry = f"✅ Applied SMOTE balancing with target: {target_col}"
+                        st.session_state['feature_engineering_log'].append(log_entry)
+                        
+                        st.success("✅ SMOTE balancing applied successfully!")
+                        
+                        new_class_counts = pd.Series(y_resampled).value_counts()
+                        st.markdown("#### Class Distribution (After)")
+                        fig_after = px.bar(
+                            x=new_class_counts.index.astype(str),
+                            y=new_class_counts.values,
+                            labels={'x': target_col, 'y': 'Count'},
+                            title="After SMOTE"
+                        )
+                        fig_after.update_layout(height=400)
+                        st.plotly_chart(fig_after, use_container_width=True)
+                        
+                        for idx, count in new_class_counts.items():
+                            st.write(f"{idx}: {count} samples")
+                        
+                        st.info(f"Original size: {len(df)} → New size: {len(df_resampled)}")
+                        st.rerun()
+                    else:
+                        st.error("❌ Unable to apply SMOTE to the selected target column.")
+                except Exception as e:
+                    st.error(f"❌ Error applying SMOTE: {str(e)}")
+
+
+def render_feature_engineering_summary(df: pd.DataFrame):
+    """
+    Render summary of feature engineering operations.
+    
+    Args:
+        df: The pandas DataFrame
+    """
+    st.subheader("📋 Feature Engineering Summary")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Total Columns", df.shape[1])
+    with col2:
+        st.metric("Total Rows", df.shape[0])
+    with col3:
+        st.metric("Operations Performed", len(st.session_state.get('feature_engineering_log', [])))
+    
+    if st.session_state.get('feature_engineering_log'):
+        st.markdown("#### Operation Log")
+        for log in st.session_state['feature_engineering_log']:
+            st.write(log)
+    
+    st.markdown("#### Current Dataset Info")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write(f"**Numeric Columns:** {len(get_numeric_columns(df))}")
+        for col in get_numeric_columns(df):
+            st.caption(col)
+    
+    with col2:
+        st.write(f"**Categorical Columns:** {len(get_categorical_columns(df))}")
+        for col in get_categorical_columns(df):
+            st.caption(col)
+
+
+def render_feature_engineering_tab(df: pd.DataFrame):
+    """
+    Render the complete feature engineering tab.
+    
+    Args:
+        df: The pandas DataFrame
+    """
+    if df is None or df.empty:
+        st.info("👋 Please upload a data file to start feature engineering.")
+        return
+    
+    st.header("⚡ Feature Engineering & Preprocessing")
+    
+    fe_tabs = st.tabs([
+        "🏷️ Categorical Encoding",
+        "⚖️ SMOTE Balancing",
+        "📋 Summary"
+    ])
+    
+    with fe_tabs[0]:
+        render_categorical_encoding_tab(df)
+    
+    with fe_tabs[1]:
+        render_smote_balancing_tab(df)
+    
+    with fe_tabs[2]:
+        render_feature_engineering_summary(df)
+
+
 def render_eda_tab(df: pd.DataFrame):
     """
     Render the complete EDA tab with all analysis sections.
@@ -541,13 +828,16 @@ def main():
         st.warning("Please try uploading a different file or check the file format.")
     
     if st.session_state['df'] is not None:
-        main_tabs = st.tabs(["📋 Data Preview", "🔬 EDA"])
+        main_tabs = st.tabs(["📋 Data Preview", "🔬 EDA", "⚡ Feature Engineering"])
         
         with main_tabs[0]:
             render_data_preview(st.session_state['df'])
         
         with main_tabs[1]:
             render_eda_tab(st.session_state['df'])
+        
+        with main_tabs[2]:
+            render_feature_engineering_tab(st.session_state['df'])
     else:
         render_empty_state()
 
